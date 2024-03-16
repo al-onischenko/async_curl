@@ -5,7 +5,6 @@
 #include <iostream>
 #include <boost/asio.hpp>
 #include <boost/process.hpp>
-//#include <boost/process/extend.hpp>
 
 namespace {
 using boost::asio::ip::tcp;
@@ -15,17 +14,17 @@ class tcp_connection : public std::enable_shared_from_this<tcp_connection> {
 	tcp::socket socket_;
 	std::string url_;
 	boost::asio::streambuf buf_;
-	//std::array<char, 512> buf_;
-	bp::async_pipe apipe_;
+	std::shared_ptr<bp::child> child_ptr_;
 
 	void do_read() {
 		auto self(shared_from_this());
 		// read URL
+		url_.clear();
 		boost::asio::async_read_until(socket_, boost::asio::dynamic_buffer(url_), '\n', 
 			[this, self](boost::system::error_code ec, std::size_t length) {
 				if(!ec) {
 					url_.erase(std::find(url_.begin(), url_.end(), '\r'), url_.end());
-std::cerr << "URL: " << url_ << std::endl;
+					std::cerr << "URL: " << url_ << std::endl;
 					read_from_child(length);
 				}
 			});
@@ -33,42 +32,31 @@ std::cerr << "URL: " << url_ << std::endl;
 	void read_from_child(std::size_t length) {
 		auto self(shared_from_this());
 		// run curl
-		auto ptr = std::make_shared<bp::child>(bp::search_path("curl"), url_,
-			bp::std_out > apipe_//,
-		  	//(boost::asio::io_context&)socket_.get_executor().context(),
-			//bp::on_exit=[this, self](int e, const std::error_code& ec){std::cerr << "child exited with " << e << " " << ec.message() << std::endl;}
+		child_ptr_ = std::make_shared<bp::child>(bp::search_path("curl"), url_,
+			bp::std_out > buf_,
+		    	bp::std_err > buf_,
+		  	(boost::asio::io_context&)socket_.get_executor().context(),
+			bp::on_exit = [this, self](int e, const std::error_code& ec) {
+				std::cerr << "child exited with " << e << " " << ec.message() << std::endl;
+				do_write();
+			}
 		);
-		//boost::asio::async_read(apipe_, boost::asio::buffer(buf_), 
-		boost::asio::async_read(apipe_, buf_, 
-			[this, self, ptr](boost::system::error_code ec, std::size_t length) {
-				std::cerr << "read length " << length << std::endl;
-				if(!ec) {
-				}
-				else if(ec == boost::asio::error::eof) {
-					do_write(length);
-				}
-				else {
-					std::cerr << ec.message() << std::endl;
-				}
-			});
 	}
-	void do_write(std::size_t length) {
+
+	void do_write() {
 		auto self(shared_from_this());
 		// write to client
-		//socket_.async_write_some(boost::asio::buffer(buf_.data(), length), 
 		async_write(socket_, buf_, 
 			[this, self](boost::system::error_code ec, std::size_t length) {
 				if(!ec) {
-					//do_read();
+					std::cerr << "send " << length << std::endl;
+					do_read();
 				}
 			});
 	}
 public:
 	explicit tcp_connection(tcp::socket socket)
-		: socket_(std::move(socket)),
-		  apipe_((boost::asio::io_context&)socket_.get_executor().context())
-	{
-		buf_.prepare(512);
+		: socket_(std::move(socket)) {
 	}
 	~tcp_connection() {
 	}
